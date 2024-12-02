@@ -21,16 +21,16 @@ int main() {
     key_t key = ftok("oss.c", 65);
     msgid = msgget(key, 0666 | IPC_CREAT);
 
-    srand(getpid()); // Seed random number generator with PID for uniqueness
+    srand(getpid()); // Seed random number generator with PID for randomness
     int pid = getpid();
     int runtime = 0;
 
     printf("USER PID: %d started\n", pid);
 
-    while (runtime < 5000) { // User runs for a fixed amount of time
-        runtime += rand() % 100 + 1; // Simulate elapsed runtime
+    while (runtime < 5000) { // Simulated runtime for the user process
+        runtime += rand() % 100 + 1; // Increment runtime randomly
 
-        // Generate a random page number to access
+        // Generate a random page number to request
         int page_number = rand() % PAGE_COUNT;
 
         // Randomly decide whether to read or write
@@ -41,16 +41,16 @@ int main() {
         msg.page_number = page_number;
         msg.action = is_write ? REQUEST + 1 : REQUEST; // 1 = Read, 2 = Write
 
-        // Send the memory request to OSS
+        // Send the request message to OSS
         msgsnd(msgid, &msg, sizeof(msg) - sizeof(long), 0);
         printf("USER PID: %d %s page %d\n", pid, is_write ? "writing to" : "reading from", page_number);
 
         // Simulate a random delay before the next request
-        struct timespec ts = {0, (rand() % 100 + 1) * 1000000}; // Random sleep between 1-100 ms
+        struct timespec ts = {0, (rand() % 100 + 1) * 1000000}; // Random delay 1-100 ms
         nanosleep(&ts, NULL);
 
-        // Randomly decide whether to terminate
-        if (rand() % 100 < 10) { // 10% chance to terminate
+        // Randomly decide whether to terminate (10% chance)
+        if (rand() % 100 < 10) {
             msg.action = TERMINATE;
             msgsnd(msgid, &msg, sizeof(msg) - sizeof(long), 0);
             printf("USER PID: %d terminating\n", pid);
@@ -58,5 +58,6 @@ int main() {
         }
     }
 
+    printf("USER PID: %d finished execution\n", pid);
     return 0;
 }
