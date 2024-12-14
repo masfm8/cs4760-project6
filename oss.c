@@ -11,18 +11,17 @@
 #include <time.h>
 
 #define MAX_PROCESSES 18
-#define FRAME_COUNT 256  // Total frames in the system
-#define PAGE_COUNT 32    // Pages per process
+#define FRAME_COUNT 8   // Adjusted for easier tracking
+#define PAGE_COUNT 32
 #define TIME_INCREMENT 100000
-#define DEADLOCK_CHECK_INTERVAL 1000000
-#define SIMULATION_TIME_LIMIT 20000000 // 20 seconds
+#define SIMULATION_TIME_LIMIT 20000000
 
 typedef struct {
-    int occupied;          // Whether the frame is occupied
-    int dirty;             // Whether the frame has been modified
-    int process_id;        // Process using the frame
-    int page_number;       // Page number in the process
-    unsigned long last_used_time; // LRU timestamp
+    int occupied;
+    int dirty;
+    int process_id;
+    int page_number;
+    unsigned long last_used_time;
 } FrameTableEntry;
 
 typedef struct {
@@ -34,18 +33,18 @@ typedef struct {
 
 FrameTableEntry frameTable[FRAME_COUNT];
 int pageTable[MAX_PROCESSES][PAGE_COUNT];
-static pid_t pids[MAX_PROCESSES];
-static int clock_ns = 0;
-static int activeProcesses = 0;
+pid_t pids[MAX_PROCESSES];
+int clock_ns = 0;
+int activeProcesses = 0;
+FILE *logfile;  // Log file pointer
 
-// Function Prototypes
 void initializeFrameTable();
 void initializePageTable();
 void printMemoryState();
 void handlePageRequest(int process_id, int page_number, int action);
 void cleanup();
+int selectVictimFrame();
 
-// Signal handler for cleanup on CTRL+C
 void signalHandler(int sig) {
     cleanup();
     exit(0);
@@ -58,12 +57,18 @@ int main() {
 
     signal(SIGINT, signalHandler);
 
+    logfile = fopen("oss.log", "w");
+    if (logfile == NULL) {
+        perror("Error opening log file");
+        exit(EXIT_FAILURE);
+    }
+
     initializeFrameTable();
     initializePageTable();
 
     printf("OSS: Starting simulation\n");
+    fprintf(logfile, "OSS: Starting simulation\n");
 
-    // Spawn child processes
     for (int i = 0; i < MAX_PROCESSES; i++) {
         if ((pids[i] = fork()) == 0) {
             execl("./user", "./user", NULL);
@@ -76,13 +81,21 @@ int main() {
     while (clock_ns < SIMULATION_TIME_LIMIT && activeProcesses > 0) {
         clock_ns += TIME_INCREMENT;
 
-        // Process messages from user processes
         Message msg;
         if (msgrcv(msgid, &msg, sizeof(msg) - sizeof(long), 1, IPC_NOWAIT) != -1) {
-            if (msg.action == 1 || msg.action == 2) { // Read or Write
+            if (msg.action == 1 || msg.action == 2) {
+                printf("OSS: P%d requesting %s of address %d at time %d\n", 
+                        msg.pid % MAX_PROCESSES, 
+                        msg.action == 1 ? "read" : "write", 
+                        msg.page_number, clock_ns);
+                fprintf(logfile, "OSS: P%d requesting %s of address %d at time %d\n", 
+                        msg.pid % MAX_PROCESSES, 
+                        msg.action == 1 ? "read" : "write", 
+                        msg.page_number, clock_ns);
                 handlePageRequest(msg.pid % MAX_PROCESSES, msg.page_number, msg.action);
-            } else if (msg.action == 3) { // Terminate
-                printf("OSS: Process P%d terminating and releasing all frames\n", msg.pid % MAX_PROCESSES);
+            } else if (msg.action == 3) {
+                printf("OSS: Process P%d terminating\n", msg.pid % MAX_PROCESSES);
+                fprintf(logfile, "OSS: Process P%d terminating\n", msg.pid % MAX_PROCESSES);
                 for (int i = 0; i < FRAME_COUNT; i++) {
                     if (frameTable[i].occupied && frameTable[i].process_id == msg.pid % MAX_PROCESSES) {
                         frameTable[i].occupied = 0;
@@ -96,8 +109,7 @@ int main() {
         }
 
         printMemoryState();
-
-        struct timespec ts = {0, 1000000}; // Sleep for 1 ms
+        struct timespec ts = {0, 1000000};
         nanosleep(&ts, NULL);
     }
 
@@ -118,7 +130,7 @@ void initializeFrameTable() {
 void initializePageTable() {
     for (int i = 0; i < MAX_PROCESSES; i++) {
         for (int j = 0; j < PAGE_COUNT; j++) {
-            pageTable[i][j] = -1; // -1 indicates the page is not in any frame
+            pageTable[i][j] = -1;
         }
     }
 }
@@ -126,22 +138,20 @@ void initializePageTable() {
 void handlePageRequest(int process_id, int page_number, int action) {
     int frame = -1;
 
-    // Check if the page is already in a frame
     for (int i = 0; i < FRAME_COUNT; i++) {
         if (frameTable[i].occupied && frameTable[i].process_id == process_id &&
             frameTable[i].page_number == page_number) {
             frame = i;
-            frameTable[i].last_used_time = clock_ns; // Update LRU timestamp
-            printf("OSS: Address %d already in frame %d, granting %s access to P%d\n",
-                   page_number, i, action == 1 ? "read" : "write", process_id);
-            if (action == 2) { // Write
-                frameTable[i].dirty = 1;
-            }
+            frameTable[i].last_used_time = clock_ns;
+            printf("OSS: Address %d found in frame %d, P%d (%s)\n", 
+                    page_number, i, process_id, action == 1 ? "read" : "write");
+            fprintf(logfile, "OSS: Address %d found in frame %d, P%d (%s)\n", 
+                    page_number, i, process_id, action == 1 ? "read" : "write");
+            if (action == 2) frameTable[i].dirty = 1;
             return;
         }
     }
 
-    // Page fault: Find an empty frame or replace LRU
     for (int i = 0; i < FRAME_COUNT; i++) {
         if (!frameTable[i].occupied) {
             frame = i;
@@ -149,75 +159,69 @@ void handlePageRequest(int process_id, int page_number, int action) {
         }
     }
 
-    if (frame == -1) {
-        // No free frame, find the LRU frame
-        unsigned long oldest_time = clock_ns;
-        for (int i = 0; i < FRAME_COUNT; i++) {
-            if (frameTable[i].last_used_time < oldest_time) {
-                oldest_time = frameTable[i].last_used_time;
-                frame = i;
-            }
-        }
-        printf("OSS: Replacing frame %d (P%d, page %d)\n", frame,
-               frameTable[frame].process_id, frameTable[frame].page_number);
+    if (frame == -1) frame = selectVictimFrame();
 
-        // Write back if dirty
-        if (frameTable[frame].dirty) {
-            printf("OSS: Dirty bit set for frame %d, writing back to memory\n", frame);
-        }
-
-        // Remove the page from the old process's page table
-        pageTable[frameTable[frame].process_id][frameTable[frame].page_number] = -1;
+    if (frameTable[frame].dirty) {
+        printf("OSS: Writing back dirty frame %d\n", frame);
+        fprintf(logfile, "OSS: Writing back dirty frame %d\n", frame);
     }
 
-    // Load the new page into the frame
+    pageTable[frameTable[frame].process_id][frameTable[frame].page_number] = -1;
+
     frameTable[frame].occupied = 1;
-    frameTable[frame].dirty = (action == 2); // Set dirty if it's a write
+    frameTable[frame].dirty = (action == 2);
     frameTable[frame].process_id = process_id;
     frameTable[frame].page_number = page_number;
     frameTable[frame].last_used_time = clock_ns;
 
-    // Update the page table
     pageTable[process_id][page_number] = frame;
+    printf("OSS: Address %d loaded into frame %d for P%d (%s)\n", page_number, frame, process_id, action == 1 ? "read" : "write");
+    fprintf(logfile, "OSS: Address %d loaded into frame %d for P%d (%s)\n", page_number, frame, process_id, action == 1 ? "read" : "write");
+}
 
-    printf("OSS: Address %d loaded into frame %d for P%d (%s)\n", page_number, frame, process_id,
-           action == 1 ? "read" : "write");
+int selectVictimFrame() {
+    unsigned long oldest_time = clock_ns;
+    int victim = 0;
+    for (int i = 0; i < FRAME_COUNT; i++) {
+        if (frameTable[i].last_used_time < oldest_time) {
+            oldest_time = frameTable[i].last_used_time;
+            victim = i;
+        }
+    }
+    return victim;
 }
 
 void printMemoryState() {
-    printf("Current memory layout at time %d ns:\n", clock_ns);
-    printf("Frame Table:\n");
+    fprintf(logfile, "\nCurrent memory layout at time %d ns:\n", clock_ns);
+    fprintf(logfile, "Frame Table:\n");
     for (int i = 0; i < FRAME_COUNT; i++) {
         if (frameTable[i].occupied) {
-            printf("Frame %d: P%d, Page %d, Dirty: %d, LastUsed: %lu\n", i,
-                   frameTable[i].process_id, frameTable[i].page_number,
-                   frameTable[i].dirty, frameTable[i].last_used_time);
+            fprintf(logfile, "Frame %d: P%d, Page %d, Dirty: %d, LastUsed: %lu\n", 
+                   i, frameTable[i].process_id, frameTable[i].page_number, frameTable[i].dirty, frameTable[i].last_used_time);
         } else {
-            printf("Frame %d: Empty\n", i);
+            fprintf(logfile, "Frame %d: Empty\n", i);
         }
     }
-
-    printf("\nPage Tables:\n");
+    fprintf(logfile, "\nPage Tables:\n");
     for (int i = 0; i < MAX_PROCESSES; i++) {
-        printf("P%d: ", i);
+        fprintf(logfile, "P%d: ", i);
         for (int j = 0; j < PAGE_COUNT; j++) {
-            printf("%d ", pageTable[i][j]);
+            fprintf(logfile, "%2d ", pageTable[i][j]);
         }
-        printf("\n");
+        fprintf(logfile, "\n");
     }
 }
 
 void cleanup() {
     printf("OSS: Cleaning up resources...\n");
+    fprintf(logfile, "OSS: Cleaning up resources...\n");
     for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (pids[i] > 0) {
-            kill(pids[i], SIGKILL);
-            waitpid(pids[i], NULL, 0);
-        }
+        if (pids[i] > 0) kill(pids[i], SIGKILL);
     }
+
+    fclose(logfile);
 
     key_t key = ftok("oss.c", 65);
     int msgid = msgget(key, 0666 | IPC_CREAT);
     msgctl(msgid, IPC_RMID, NULL);
-    exit(0);
 }
